@@ -1331,7 +1331,7 @@ class SupportTicketsPlugin {
         <div class="wrap">
             <h1>Add New Support Ticket</h1>
 
-            <form method="post" action="">
+            <form method="post" action="" enctype="multipart/form-data">
                 <?php wp_nonce_field('create_ticket_nonce', 'ticket_nonce'); ?>
 
                 <table class="form-table">
@@ -1394,6 +1394,16 @@ class SupportTicketsPlugin {
                             </select>
                         </td>
                     </tr>
+
+                    <tr>
+                        <th scope="row"> <label for="ticket_images">Attach Images (optional)</label></th>
+                        <td>
+
+                            <input type="file" id="ticket_images" name="ticket_images[]" multiple accept="image/*">
+                            <small>You can upload multiple images. Supported formats: JPG, PNG, GIF</small>
+                        </td>
+                    </tr>
+
                 </table>
 
                 <?php submit_button('Create Ticket', 'primary', 'create_ticket'); ?>
@@ -1406,7 +1416,7 @@ class SupportTicketsPlugin {
         if (!wp_verify_nonce($_POST['ticket_nonce'], 'create_ticket_nonce')) {
             wp_die('Security check failed');
         }
-
+        print_r($_FILES);
         $title = sanitize_text_field($_POST['ticket_title']);
         $content = wp_kses_post($_POST['ticket_content']);
         $customer_name = sanitize_text_field($_POST['customer_name']);
@@ -1431,7 +1441,9 @@ class SupportTicketsPlugin {
             update_post_meta($post_id, '_ticket_status', $status);
             update_post_meta($post_id, '_ticket_priority', $priority);
             update_post_meta($post_id, '_ticket_category', $category);
-
+            if (!empty($_FILES['ticket_images']['name'][0])) {
+                $this->handle_ticket_images($post_id, $_FILES['ticket_images']);
+            }
             wp_redirect(admin_url('admin.php?page=support-tickets&created=1'));
             exit;
         }

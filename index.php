@@ -465,6 +465,7 @@ class SupportTicketsPlugin {
                 if (!empty($_FILES['reply_images']['name'][0])) {
                     $this->handle_reply_images($ticket_id, $reply_id, $_FILES['reply_images']);
                 }
+                $this->send_email_notification('reply_admin', $ticket_id, $reply_id);
 
                 wp_send_json_success('Reply added successfully.');
             } else {
@@ -721,10 +722,12 @@ class SupportTicketsPlugin {
                     'created_at' => current_time('mysql')
                 )
             );
+            $reply_id = $wpdb->insert_id;
+            $this->send_email_notification('reply_user', $post_id, $reply_id);
 
             // Handle admin reply image uploads
             if ($result && !empty($_FILES['admin_reply_images']['name'][0])) {
-                $reply_id = $wpdb->insert_id;
+
                 $this->handle_reply_images($post_id, $reply_id, $_FILES['admin_reply_images']);
             }
         }
@@ -1416,7 +1419,7 @@ class SupportTicketsPlugin {
         if (!wp_verify_nonce($_POST['ticket_nonce'], 'create_ticket_nonce')) {
             wp_die('Security check failed');
         }
-        print_r($_FILES);
+
         $title = sanitize_text_field($_POST['ticket_title']);
         $content = wp_kses_post($_POST['ticket_content']);
         $customer_name = sanitize_text_field($_POST['customer_name']);
@@ -1444,6 +1447,10 @@ class SupportTicketsPlugin {
             if (!empty($_FILES['ticket_images']['name'][0])) {
                 $this->handle_ticket_images($post_id, $_FILES['ticket_images']);
             }
+            // ── email notifications ─────────────────────────────
+            $this->send_email_notification('new_ticket_admin', $post_id);
+            $this->send_email_notification('new_ticket_user',  $post_id);
+
             wp_redirect(admin_url('admin.php?page=support-tickets&created=1'));
             exit;
         }
@@ -1474,12 +1481,107 @@ class SupportTicketsPlugin {
         wp_redirect(admin_url('admin.php?page=support-tickets&bulk_action=1'));
         exit;
     }
+    /**
+     * Send a templated email for tickets / replies
+     *
+     * @param string  $context   new_ticket_admin | new_ticket_user | reply_admin | reply_user
+     * @param int     $ticket_id
+     * @param int     $reply_id  optional
+     */
+    private function send_email_notification($context, $ticket_id, $reply_id = 0) {
+
+        /* ── safety checks ───────────────────────────────────────────── */
+        if ( ! get_option('st_enable_email_notifications') ) {
+            return;                         // master switch is off
+        }
+
+        /* ── build placeholder map ───────────────────────────────────── */
+        $placeholders = [
+            '{site_name}'  => get_bloginfo('name'),
+            '{site_url}'   => home_url(),
+        ];
+
+        $ticket  = get_post($ticket_id);
+        $meta    = get_post_meta($ticket_id);
+
+        $placeholders += [
+            '{ticket_id}'        => $ticket_id,
+            '{ticket_title}'     => $ticket->post_title,
+            '{ticket_content}'   => wp_strip_all_tags($ticket->post_content),
+            '{customer_name}'    => $meta['_customer_name'][0]  ?? '',
+            '{customer_email}'   => $meta['_customer_email'][0] ?? '',
+            '{status}'           => $meta['_ticket_status'][0]  ?? '',
+            '{priority}'         => $meta['_ticket_priority'][0]?? '',
+            '{category}'         => $meta['_ticket_category'][0]?? '',
+            '{ticket_url}'       => get_permalink($ticket_id),
+            '{tickets_url}'      => home_url('/my-tickets/'), // adjust if needed
+        ];
+
+        if ( $reply_id ) { // reply‑level placeholders
+            global $wpdb;
+            $reply = $wpdb->get_row(
+                $wpdb->prepare("SELECT * FROM {$wpdb->prefix}support_ticket_replies WHERE id = %d", $reply_id)
+            );
+            if ( $reply ) {
+                $placeholders['{reply_content}'] = wp_strip_all_tags($reply->reply_content);
+                $placeholders['{reply_author}']  = $reply->user_name;
+            }
+        }
+
+        /* ── map $context → templates & recipient ────────────────────── */
+        switch ( $context ) {
+
+            case 'new_ticket_admin':
+                if ( ! get_option('st_notify_on_new_ticket') ) { return; }
+                $to       = get_option('admin_email');
+                $subject  = get_option('st_new_ticket_admin_subject',  'New Ticket: {ticket_title}');
+                $message  = get_option('st_new_ticket_admin_template', '');
+                break;
+
+            case 'new_ticket_user':
+                $to       = $placeholders['{customer_email}'];
+                $subject  = get_option('st_new_ticket_user_subject',   'We received your ticket');
+                $message  = get_option('st_new_ticket_user_template',  '');
+                break;
+
+            case 'reply_admin':
+                $to       = get_option('admin_email');
+                $subject  = get_option('st_reply_admin_subject',       'New reply on ticket #{ticket_id}');
+                $message  = get_option('st_reply_admin_template',      '');
+                break;
+
+            case 'reply_user':
+                if ( ! get_option('st_notify_on_reply') ) { return; }
+                $to       = $placeholders['{customer_email}'];
+                $subject  = get_option('st_reply_user_subject',        'New reply to your ticket');
+                $message  = get_option('st_reply_user_template',       '');
+                break;
+
+            default:
+                return; // unknown context
+        }
+
+        /* ── merge placeholders │ format │ send ──────────────────────── */
+        $subject = str_replace(array_keys($placeholders), array_values($placeholders), $subject);
+        $body    = nl2br(str_replace(array_keys($placeholders), array_values($placeholders), $message));
+
+        $from_name = get_option('st_email_from_name',    get_bloginfo('name'));
+        $from_addr = get_option('st_email_from_address', get_option('admin_email'));
+
+        $headers = [
+            'Content-Type: text/html; charset=UTF-8',
+            'From: ' . $from_name . ' <' . $from_addr . '>',
+        ];
+
+        wp_mail($to, $subject, $body, $headers);
+    }
 
     public function activate() {
         $this->register_post_type();
         $this->create_tables();
         flush_rewrite_rules();
     }
+
 }
 
 // Initialize the plugin

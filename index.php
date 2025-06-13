@@ -15,6 +15,8 @@ class SupportTicketsPlugin {
 
     public function __construct() {
         add_action('init', array($this, 'init'));
+        add_action('admin_init', array($this, 'register_settings'));
+
         add_action('admin_menu', array($this, 'add_admin_menu'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
         add_action('wp_enqueue_scripts', array($this, 'enqueue_frontend_scripts'));
@@ -23,12 +25,15 @@ class SupportTicketsPlugin {
         add_action('wp_ajax_get_user_tickets', array($this, 'handle_ajax_get_user_tickets'));
         add_action('wp_ajax_reply_to_ticket', array($this, 'handle_ajax_reply_to_ticket'));
         add_action('wp_ajax_upload_ticket_image', array($this, 'handle_ajax_image_upload'));
+        add_action('post_edit_form_tag', array($this, 'add_form_enctype'));
+
         add_action('wp_ajax_nopriv_upload_ticket_image', array($this, 'handle_ajax_image_upload'));
         register_activation_hook(__FILE__, array($this, 'activate'));
     }
 
     public function init() {
         $this->register_post_type();
+        $this->register_ticket_manager_role();
         $this->register_blocks();
         $this->create_tables();
     }
@@ -61,7 +66,31 @@ class SupportTicketsPlugin {
         add_action('add_meta_boxes', array($this, 'add_meta_boxes'));
         add_action('save_post', array($this, 'save_meta_data'));
     }
+    function register_ticket_manager_role() {
+        // Capabilities specific to support tickets
+        $caps = array(
+            'read',
+            'edit_support_ticket',
+            'edit_support_tickets',
+            'edit_others_support_tickets',
+            'publish_support_tickets',
+            'read_private_support_tickets',
+            'delete_support_ticket',
+            'delete_support_tickets',
+            'delete_others_support_tickets',
+        );
 
+        // Create the role if not exists
+        add_role('ticket_manager', 'Ticket Manager', array_fill_keys($caps, true));
+
+        // Also assign these caps to Administrator
+        $admin = get_role('administrator');
+        if ($admin) {
+            foreach ($caps as $cap) {
+                $admin->add_cap($cap);
+            }
+        }
+    }
     public function create_tables() {
         global $wpdb;
 
@@ -486,6 +515,7 @@ class SupportTicketsPlugin {
         global $wpdb;
 
         for ($i = 0; $i < count($files['name']); $i++) {
+            error_log("this".$files['name']);
             if ($files['error'][$i] === UPLOAD_ERR_OK) {
                 $file = array(
                     'name' => $files['name'][$i],
@@ -642,10 +672,17 @@ class SupportTicketsPlugin {
         echo '<div class="admin-reply-form" style="margin-top: 20px; border-top: 1px solid #ddd; padding-top: 20px;">';
         echo '<h4>Add Admin Reply:</h4>';
         echo '<textarea name="admin_reply" rows="4" style="width: 100%;" placeholder="Type your reply..."></textarea>';
+        echo '<p><label for="admin_reply_images">Attach Images:</label></p>';
+        echo '<p><input type="file" name="admin_reply_images[]" id="admin_reply_images" multiple accept="image/*" /></p>';
         echo '<p><input type="submit" name="add_admin_reply" class="button button-primary" value="Add Reply" /></p>';
         echo '</div>';
     }
-
+    public function add_form_enctype() {
+        global $post;
+        if ($post && $post->post_type == 'support_ticket') {
+            echo ' enctype="multipart/form-data"';
+        }
+    }
     public function save_meta_data($post_id) {
         if (!isset($_POST['support_ticket_nonce']) || !wp_verify_nonce($_POST['support_ticket_nonce'], 'support_ticket_meta')) {
             return;
@@ -672,7 +709,7 @@ class SupportTicketsPlugin {
             global $wpdb;
             $current_user = wp_get_current_user();
 
-            $wpdb->insert(
+            $result = $wpdb->insert(
                 $wpdb->prefix . 'support_ticket_replies',
                 array(
                     'ticket_id' => $post_id,
@@ -684,6 +721,12 @@ class SupportTicketsPlugin {
                     'created_at' => current_time('mysql')
                 )
             );
+
+            // Handle admin reply image uploads
+            if ($result && !empty($_FILES['admin_reply_images']['name'][0])) {
+                $reply_id = $wpdb->insert_id;
+                $this->handle_reply_images($post_id, $reply_id, $_FILES['admin_reply_images']);
+            }
         }
     }
 
@@ -722,6 +765,14 @@ class SupportTicketsPlugin {
             'support-tickets-new',
             array($this, 'new_ticket_page')
         );
+        add_submenu_page(
+            'support-tickets',
+            'Settings',
+            'Settings',
+            'manage_options',
+            'support-tickets-settings',
+            array($this, 'settings_page')
+        );
     }
 
     public function admin_page() {
@@ -735,9 +786,9 @@ class SupportTicketsPlugin {
         $status_filter = isset($_GET['status']) ? sanitize_text_field($_GET['status']) : '';
         $priority_filter = isset($_GET['priority']) ? sanitize_text_field($_GET['priority']) : '';
         $category_filter = isset($_GET['category']) ? sanitize_text_field($_GET['category']) : '';
-
         // Pagination
-        $per_page = 20;
+        $per_page = get_option('st_tickets_per_page', 20);
+
         $page = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
         $offset = ($page - 1) * $per_page;
 
@@ -975,7 +1026,302 @@ class SupportTicketsPlugin {
 
         wp_reset_postdata();
     }
+    public function register_settings() {
+        // General settings
+        register_setting('support_tickets_general', 'st_tickets_per_page');
+        register_setting('support_tickets_general', 'st_default_status');
+        register_setting('support_tickets_general', 'st_default_priority');
+        register_setting('support_tickets_general', 'st_allow_file_uploads');
+        register_setting('support_tickets_general', 'st_max_file_size');
 
+        // Email settings
+        register_setting('support_tickets_email', 'st_enable_email_notifications');
+        register_setting('support_tickets_email', 'st_admin_email');
+        register_setting('support_tickets_email', 'st_email_from_name');
+        register_setting('support_tickets_email', 'st_email_from_address');
+        register_setting('support_tickets_email', 'st_notify_on_new_ticket');
+        register_setting('support_tickets_email', 'st_notify_on_reply');
+
+        // Email templates
+        register_setting('support_tickets_email_templates', 'st_new_ticket_admin_subject');
+        register_setting('support_tickets_email_templates', 'st_new_ticket_admin_template');
+        register_setting('support_tickets_email_templates', 'st_new_ticket_user_subject');
+        register_setting('support_tickets_email_templates', 'st_new_ticket_user_template');
+        register_setting('support_tickets_email_templates', 'st_reply_admin_subject');
+        register_setting('support_tickets_email_templates', 'st_reply_admin_template');
+        register_setting('support_tickets_email_templates', 'st_reply_user_subject');
+        register_setting('support_tickets_email_templates', 'st_reply_user_template');
+    }
+
+    public function settings_page() {
+        $active_tab = isset($_GET['tab']) ? $_GET['tab'] : 'general';
+
+        // Handle form submissions
+        if (isset($_POST['submit'])) {
+            $this->handle_settings_save();
+        }
+        ?>
+        <div class="wrap">
+            <h1>Support Tickets Settings</h1>
+
+            <!-- Tab Navigation -->
+            <h2 class="nav-tab-wrapper">
+                <a href="?page=support-tickets-settings&tab=general" class="nav-tab <?php echo $active_tab == 'general' ? 'nav-tab-active' : ''; ?>">General</a>
+                <a href="?page=support-tickets-settings&tab=email" class="nav-tab <?php echo $active_tab == 'email' ? 'nav-tab-active' : ''; ?>">Email</a>
+                <a href="?page=support-tickets-settings&tab=email_templates" class="nav-tab <?php echo $active_tab == 'email_templates' ? 'nav-tab-active' : ''; ?>">Email Templates</a>
+            </h2>
+
+            <form method="post" action="">
+                <?php wp_nonce_field('support_tickets_settings', 'settings_nonce'); ?>
+                <input type="hidden" name="active_tab" value="<?php echo $active_tab; ?>" />
+
+                <?php
+                switch ($active_tab) {
+                    case 'general':
+                        $this->render_general_settings();
+                        break;
+                    case 'email':
+                        $this->render_email_settings();
+                        break;
+                    case 'email_templates':
+                        $this->render_email_template_settings();
+                        break;
+                }
+                ?>
+
+                <?php submit_button(); ?>
+            </form>
+        </div>
+        <?php
+    }
+
+    private function render_general_settings() {
+        $tickets_per_page = get_option('st_tickets_per_page', 20);
+        $default_status = get_option('st_default_status', 'open');
+        $default_priority = get_option('st_default_priority', 'medium');
+        $allow_file_uploads = get_option('st_allow_file_uploads', 1);
+        $max_file_size = get_option('st_max_file_size', 5);
+        ?>
+        <table class="form-table">
+            <tr>
+                <th scope="row">Tickets Per Page</th>
+                <td>
+                    <input type="number" name="st_tickets_per_page" value="<?php echo esc_attr($tickets_per_page); ?>" min="1" max="100" />
+                    <p class="description">Number of tickets to display per page in admin.</p>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">Default Ticket Status</th>
+                <td>
+                    <select name="st_default_status">
+                        <option value="open" <?php selected($default_status, 'open'); ?>>Open</option>
+                        <option value="in_progress" <?php selected($default_status, 'in_progress'); ?>>In Progress</option>
+                        <option value="resolved" <?php selected($default_status, 'resolved'); ?>>Resolved</option>
+                        <option value="closed" <?php selected($default_status, 'closed'); ?>>Closed</option>
+                    </select>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">Default Priority</th>
+                <td>
+                    <select name="st_default_priority">
+                        <option value="low" <?php selected($default_priority, 'low'); ?>>Low</option>
+                        <option value="medium" <?php selected($default_priority, 'medium'); ?>>Medium</option>
+                        <option value="high" <?php selected($default_priority, 'high'); ?>>High</option>
+                        <option value="urgent" <?php selected($default_priority, 'urgent'); ?>>Urgent</option>
+                    </select>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">Allow File Uploads</th>
+                <td>
+                    <label>
+                        <input type="checkbox" name="st_allow_file_uploads" value="1" <?php checked($allow_file_uploads, 1); ?> />
+                        Enable file uploads for tickets
+                    </label>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">Maximum File Size</th>
+                <td>
+                    <input type="number" name="st_max_file_size" value="<?php echo esc_attr($max_file_size); ?>" min="1" max="50" /> MB
+                    <p class="description">Maximum file size for uploads.</p>
+                </td>
+            </tr>
+        </table>
+        <?php
+    }
+
+    private function render_email_settings() {
+        $enable_email = get_option('st_enable_email_notifications', 0);
+        $admin_email = get_option('st_admin_email', get_option('admin_email'));
+        $from_name = get_option('st_email_from_name', get_bloginfo('name'));
+        $from_address = get_option('st_email_from_address', get_option('admin_email'));
+        $notify_new_ticket = get_option('st_notify_on_new_ticket', 1);
+        $notify_reply = get_option('st_notify_on_reply', 1);
+        ?>
+        <table class="form-table">
+            <tr>
+                <th scope="row">Enable Email Notifications</th>
+                <td>
+                    <label>
+                        <input type="checkbox" name="st_enable_email_notifications" value="1" <?php checked($enable_email, 1); ?> />
+                        Enable email notifications for tickets
+                    </label>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">Admin Email</th>
+                <td>
+                    <input type="email" name="st_admin_email" value="<?php echo esc_attr($admin_email); ?>" class="regular-text" />
+                    <p class="description">Email address to receive admin notifications.</p>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">From Name</th>
+                <td>
+                    <input type="text" name="st_email_from_name" value="<?php echo esc_attr($from_name); ?>" class="regular-text" />
+                    <p class="description">Name that appears in the "From" field of emails.</p>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">From Email Address</th>
+                <td>
+                    <input type="email" name="st_email_from_address" value="<?php echo esc_attr($from_address); ?>" class="regular-text" />
+                    <p class="description">Email address that appears in the "From" field.</p>
+                </td>
+            </tr>
+            <tr>
+                <th scope="row">Notification Types</th>
+                <td>
+                    <label>
+                        <input type="checkbox" name="st_notify_on_new_ticket" value="1" <?php checked($notify_new_ticket, 1); ?> />
+                        Notify admin when new ticket is created
+                    </label><br>
+                    <label>
+                        <input type="checkbox" name="st_notify_on_reply" value="1" <?php checked($notify_reply, 1); ?> />
+                        Notify users when admin replies to their ticket
+                    </label>
+                </td>
+            </tr>
+        </table>
+        <?php
+    }
+
+    private function render_email_template_settings() {
+        // Default templates
+        $default_new_ticket_admin = "A new support ticket has been submitted.\n\nTicket ID: {ticket_id}\nSubject: {ticket_title}\nCustomer: {customer_name} ({customer_email})\nPriority: {priority}\nCategory: {category}\n\nMessage:\n{ticket_content}\n\nView ticket: {ticket_url}";
+        $default_new_ticket_user = "Thank you for contacting us! Your support ticket has been received.\n\nTicket ID: {ticket_id}\nSubject: {ticket_title}\nStatus: {status}\nPriority: {priority}\n\nWe will respond as soon as possible.\n\nYour message:\n{ticket_content}";
+        $default_reply_admin = "A new reply has been added to ticket #{ticket_id}.\n\nTicket: {ticket_title}\nCustomer: {customer_name}\n\nReply:\n{reply_content}\n\nView ticket: {ticket_url}";
+        $default_reply_user = "You have received a reply to your support ticket.\n\nTicket ID: {ticket_id}\nSubject: {ticket_title}\nStatus: {status}\n\nReply:\n{reply_content}\n\nView your tickets: {tickets_url}";
+
+        $new_ticket_admin_subject = get_option('st_new_ticket_admin_subject', 'New Support Ticket: {ticket_title}');
+        $new_ticket_admin_template = get_option('st_new_ticket_admin_template', $default_new_ticket_admin);
+        $new_ticket_user_subject = get_option('st_new_ticket_user_subject', 'Support Ticket Received: {ticket_title}');
+        $new_ticket_user_template = get_option('st_new_ticket_user_template', $default_new_ticket_user);
+        $reply_admin_subject = get_option('st_reply_admin_subject', 'New Reply on Ticket: {ticket_title}');
+        $reply_admin_template = get_option('st_reply_admin_template', $default_reply_admin);
+        $reply_user_subject = get_option('st_reply_user_subject', 'Reply to Your Ticket: {ticket_title}');
+        $reply_user_template = get_option('st_reply_user_template', $default_reply_user);
+        ?>
+        <h3>New Ticket - Admin Notification</h3>
+        <table class="form-table">
+            <tr>
+                <th scope="row">Subject</th>
+                <td><input type="text" name="st_new_ticket_admin_subject" value="<?php echo esc_attr($new_ticket_admin_subject); ?>" class="large-text" /></td>
+            </tr>
+            <tr>
+                <th scope="row">Template</th>
+                <td><textarea name="st_new_ticket_admin_template" rows="8" class="large-text"><?php echo esc_textarea($new_ticket_admin_template); ?></textarea></td>
+            </tr>
+        </table>
+
+        <h3>New Ticket - User Confirmation</h3>
+        <table class="form-table">
+            <tr>
+                <th scope="row">Subject</th>
+                <td><input type="text" name="st_new_ticket_user_subject" value="<?php echo esc_attr($new_ticket_user_subject); ?>" class="large-text" /></td>
+            </tr>
+            <tr>
+                <th scope="row">Template</th>
+                <td><textarea name="st_new_ticket_user_template" rows="8" class="large-text"><?php echo esc_textarea($new_ticket_user_template); ?></textarea></td>
+            </tr>
+        </table>
+
+        <h3>Reply - Admin Notification</h3>
+        <table class="form-table">
+            <tr>
+                <th scope="row">Subject</th>
+                <td><input type="text" name="st_reply_admin_subject" value="<?php echo esc_attr($reply_admin_subject); ?>" class="large-text" /></td>
+            </tr>
+            <tr>
+                <th scope="row">Template</th>
+                <td><textarea name="st_reply_admin_template" rows="8" class="large-text"><?php echo esc_textarea($reply_admin_template); ?></textarea></td>
+            </tr>
+        </table>
+
+        <h3>Reply - User Notification</h3>
+        <table class="form-table">
+            <tr>
+                <th scope="row">Subject</th>
+                <td><input type="text" name="st_reply_user_subject" value="<?php echo esc_attr($reply_user_subject); ?>" class="large-text" /></td>
+            </tr>
+            <tr>
+                <th scope="row">Template</th>
+                <td><textarea name="st_reply_user_template" rows="8" class="large-text"><?php echo esc_textarea($reply_user_template); ?></textarea></td>
+            </tr>
+        </table>
+
+        <div class="postbox" style="margin-top: 20px;">
+            <div class="inside">
+                <h4>Available Template Variables:</h4>
+                <p><strong>For tickets:</strong> {ticket_id}, {ticket_title}, {ticket_content}, {customer_name}, {customer_email}, {status}, {priority}, {category}, {ticket_url}</p>
+                <p><strong>For replies:</strong> {reply_content}, {reply_author}, {tickets_url}</p>
+                <p><strong>General:</strong> {site_name}, {site_url}</p>
+            </div>
+        </div>
+        <?php
+    }
+
+    private function handle_settings_save() {
+        if (!wp_verify_nonce($_POST['settings_nonce'], 'support_tickets_settings')) {
+            wp_die('Security check failed');
+        }
+
+        $active_tab = $_POST['active_tab'];
+
+        switch ($active_tab) {
+            case 'general':
+                update_option('st_tickets_per_page', intval($_POST['st_tickets_per_page']));
+                update_option('st_default_status', sanitize_text_field($_POST['st_default_status']));
+                update_option('st_default_priority', sanitize_text_field($_POST['st_default_priority']));
+                update_option('st_allow_file_uploads', isset($_POST['st_allow_file_uploads']) ? 1 : 0);
+                update_option('st_max_file_size', intval($_POST['st_max_file_size']));
+                break;
+
+            case 'email':
+                update_option('st_enable_email_notifications', isset($_POST['st_enable_email_notifications']) ? 1 : 0);
+                update_option('st_admin_email', sanitize_email($_POST['st_admin_email']));
+                update_option('st_email_from_name', sanitize_text_field($_POST['st_email_from_name']));
+                update_option('st_email_from_address', sanitize_email($_POST['st_email_from_address']));
+                update_option('st_notify_on_new_ticket', isset($_POST['st_notify_on_new_ticket']) ? 1 : 0);
+                update_option('st_notify_on_reply', isset($_POST['st_notify_on_reply']) ? 1 : 0);
+                break;
+
+            case 'email_templates':
+                update_option('st_new_ticket_admin_subject', sanitize_text_field($_POST['st_new_ticket_admin_subject']));
+                update_option('st_new_ticket_admin_template', sanitize_textarea_field($_POST['st_new_ticket_admin_template']));
+                update_option('st_new_ticket_user_subject', sanitize_text_field($_POST['st_new_ticket_user_subject']));
+                update_option('st_new_ticket_user_template', sanitize_textarea_field($_POST['st_new_ticket_user_template']));
+                update_option('st_reply_admin_subject', sanitize_text_field($_POST['st_reply_admin_subject']));
+                update_option('st_reply_admin_template', sanitize_textarea_field($_POST['st_reply_admin_template']));
+                update_option('st_reply_user_subject', sanitize_text_field($_POST['st_reply_user_subject']));
+                update_option('st_reply_user_template', sanitize_textarea_field($_POST['st_reply_user_template']));
+                break;
+        }
+
+        echo '<div class="notice notice-success"><p>Settings saved successfully!</p></div>';
+    }
     public function new_ticket_page() {
         if (isset($_POST['create_ticket'])) {
             $this->create_new_ticket();
